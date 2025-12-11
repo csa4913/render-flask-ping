@@ -1,11 +1,12 @@
-# app.py  (Render 서버용 공용 DB + REST API)
+# app.py  (Render 서버용 공용 DB + REST API + 검색 + 첨부파일 관리)
 
 import os
 import sqlite3
 import json
+import shutil
 from datetime import datetime
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 # ------------------------------
@@ -15,6 +16,10 @@ from flask_cors import CORS
 # SQLite DB 파일 경로 (프로젝트 폴더 안에 생성)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "orders.db")
+
+# 첨부파일 업로드 루트 폴더
+UPLOAD_ROOT = os.path.join(BASE_DIR, "uploads")
+os.makedirs(UPLOAD_ROOT, exist_ok=True)
 
 
 def get_conn():
@@ -80,17 +85,34 @@ def ping():
 
 
 # ------------------------------
-#  발주 목록 조회
+#  발주 목록 조회 (+ 검색 q)
 # ------------------------------
 @app.route("/orders", methods=["GET"])
 def list_orders():
     """
-    전체 목록 조회
+    목록 조회
+    - ?q= 검색어 가 있으면 po_number 또는 data(JSON 문자열)에서 LIKE 검색
     응답: [ { ...행 데이터... }, ... ]
     """
+    q = request.args.get("q", "").strip()
+
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM orders ORDER BY id DESC")
+
+    if q:
+        like = f"%{q}%"
+        cur.execute(
+            """
+            SELECT * FROM orders
+            WHERE po_number LIKE ?
+               OR data      LIKE ?
+            ORDER BY id DESC
+            """,
+            (like, like),
+        )
+    else:
+        cur.execute("SELECT * FROM orders ORDER BY id DESC")
+
     rows = cur.fetchall()
     conn.close()
 
@@ -215,7 +237,7 @@ def update_order(order_id: int):
 
 
 # ------------------------------
-#  발주 삭제
+#  발주 삭제 (DB + 첨부파일 폴더)
 # ------------------------------
 @app.route("/orders/<int:order_id>", methods=["DELETE"])
 def delete_order(order_id: int):
@@ -226,10 +248,103 @@ def delete_order(order_id: int):
     conn.commit()
     conn.close()
 
+    # 첨부파일 폴더도 같이 삭제
+    folder = os.path.join(UPLOAD_ROOT, str(order_id))
+    if os.path.isdir(folder):
+        shutil.rmtree(folder, ignore_errors=True)
+
     if deleted == 0:
         return jsonify({"error": "not_found"}), 404
 
     return jsonify({"status": "deleted", "id": order_id}), 200
+
+
+# ------------------------------
+#  첨부파일 업로드
+#  (EXE에서 /orders/<id>/files 로 파일 전송)
+# ------------------------------
+@app.route("/orders/<int:order_id>/files", methods=["POST"])
+def upload_files(order_id: int):
+    """
+    multipart/form-data 로 파일 업로드:
+      필드 이름: invoice_file, workconfirm_file, inspect_file, extra_pdf_file
+    업로드 후 data(JSON) 안의 해당 필드를
+      "/files/<id>/<저장파일명>" URL로 업데이트
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "not_found"}), 404
+
+    # 기존 data(JSON) 파싱
+    data = row_to_dict(row)
+    # row_to_dict 는 id, row_version, created_at, updated_at 도 포함하므로
+    # 실제 저장용 payload 에선 제거
+    meta_keys = {"id", "row_version", "created_at", "updated_at"}
+    payload = {k: v for k, v in data.items() if k not in meta_keys}
+
+    upload_dir = os.path.join(UPLOAD_ROOT, str(order_id))
+    os.makedirs(upload_dir, exist_ok=True)
+
+    file_fields = ["invoice_file", "workconfirm_file", "inspect_file", "extra_pdf_file"]
+    updated_files = {}
+
+    for field in file_fields:
+        file = request.files.get(field)
+        if not file or not file.filename:
+            continue
+
+        original_name = file.filename
+        safe_name = f"{field}_{original_name}"
+        save_path = os.path.join(upload_dir, safe_name)
+        file.save(save_path)
+
+        # 클라이언트가 접근할 URL(상대 경로) 저장
+        url_path = f"/files/{order_id}/{safe_name}"
+        payload[field] = url_path
+        updated_files[field] = url_path
+
+    # 파일이 하나도 없으면 그냥 OK 반환
+    if not updated_files:
+        conn.close()
+        return jsonify({"status": "no_files"}), 200
+
+    now = datetime.utcnow().isoformat()
+
+    # po_number 갱신 (payload에 있다고 가정)
+    po_number = str(payload.get("po_number", "")).strip()
+
+    cur.execute(
+        """
+        UPDATE orders
+        SET po_number = ?,
+            data       = ?,
+            row_version = row_version + 1,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (po_number, json.dumps(payload, ensure_ascii=False), now, order_id),
+    )
+    conn.commit()
+    conn.close()
+
+    return jsonify({"status": "ok", "files": updated_files}), 200
+
+
+# ------------------------------
+#  업로드된 파일 제공
+# ------------------------------
+@app.route("/files/<int:order_id>/<path:filename>", methods=["GET"])
+def serve_file(order_id: int, filename: str):
+    """
+    /files/<id>/<파일명> 으로 접근 시
+    uploads/<id>/<파일명> 에서 파일 제공
+    """
+    upload_dir = os.path.join(UPLOAD_ROOT, str(order_id))
+    return send_from_directory(upload_dir, filename, as_attachment=False)
 
 
 # ------------------------------
