@@ -1,324 +1,211 @@
-# app.py
-# Render 배포용 - 공용 DB + REST API + 파일 업로드 (B방식 최종본)
-
 import os
-import json
-import sqlite3
-import shutil
 from datetime import datetime
+from pathlib import Path
 
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
+from flask import Flask, request, jsonify, send_from_directory, abort
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.utils import secure_filename
 
-# ======================================================
-# 기본 설정
-# ======================================================
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-DB_PATH = os.path.join(BASE_DIR, "orders.db")
-
-UPLOAD_ROOT = os.path.join(BASE_DIR, "uploads")
-os.makedirs(UPLOAD_ROOT, exist_ok=True)
-
-
-# ======================================================
-# DB 유틸
-# ======================================================
-
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS orders (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            po_number   TEXT,
-            data        TEXT NOT NULL,
-            row_version INTEGER DEFAULT 1,
-            created_at  TEXT,
-            updated_at  TEXT
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-
-
-def row_to_dict(row: sqlite3.Row) -> dict:
-    try:
-        data = json.loads(row["data"])
-        if not isinstance(data, dict):
-            data = {}
-    except Exception:
-        data = {}
-
-    data["id"] = row["id"]
-    data["row_version"] = row["row_version"]
-    data["created_at"] = row["created_at"]
-    data["updated_at"] = row["updated_at"]
-    return data
-
-
-# ======================================================
-# Flask App
-# ======================================================
-
+# =========================
+# Flask / DB 설정
+# =========================
 app = Flask(__name__)
-CORS(app)
 
-init_db()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set")
+
+# Render 보정
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_CONTENT_LENGTH", 50 * 1024 * 1024))
+
+db = SQLAlchemy(app)
+
+# =========================
+# 파일 저장소 (Render는 휘발성)
+# =========================
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/tmp/data"))
+UPLOAD_ROOT = DATA_DIR / "uploads"
+UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
+# =========================
+# 모델 정의 (기존 SQLite 스키마 그대로)
+# =========================
+class PurchaseOrder(db.Model):
+    __tablename__ = "purchase_orders"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    vendor = db.Column(db.Text)
+    site = db.Column(db.Text)
+    po_number = db.Column(db.Text)
+    quantity = db.Column(db.Integer)
+
+    q_code = db.Column(db.Text)
+    order_date = db.Column(db.Text)
+    due_date = db.Column(db.Text)
+    manager = db.Column(db.Text)
+    invoice_no = db.Column(db.Text)
+    contract_po = db.Column(db.Text)
+
+    explosion_proof = db.Column(db.Text)
+    contract_settle = db.Column(db.Text)
+    self_test = db.Column(db.Text)
+    env_cert = db.Column(db.Text)
+    worker = db.Column(db.Text)
+    material = db.Column(db.Text)
+    area = db.Column(db.Text)
+    status = db.Column(db.Text)
+    release_cond = db.Column(db.Text)
+
+    region = db.Column(db.Text)
+    division = db.Column(db.Text)
+    line = db.Column(db.Text)
+    floor = db.Column(db.Text)
+    bay = db.Column(db.Text)
+
+    pillar_no = db.Column(db.Text)
+    control_no = db.Column(db.Text)
+    process = db.Column(db.Text)
+    equip_name = db.Column(db.Text)
+    panel_sn = db.Column(db.Text)
+    maker = db.Column(db.Text)
+    equip_model = db.Column(db.Text)
+    equip_no = db.Column(db.Text)
+
+    agent_type = db.Column(db.Text)
+    agent_amount = db.Column(db.Text)
+    smoke_detector = db.Column(db.Text)
+    o2_detector = db.Column(db.Text)
+    operation_type = db.Column(db.Text)
+    manual_box = db.Column(db.Text)
+
+    remark = db.Column(db.Text)
+
+    invoice_file = db.Column(db.Text)
+    workconfirm_file = db.Column(db.Text)
+    inspect_file = db.Column(db.Text)
+    extra_pdf_file = db.Column(db.Text)
+
+    row_version = db.Column(db.Integer, default=1)
+    created_at = db.Column(db.Text)
+    updated_at = db.Column(db.Text)
+    last_user = db.Column(db.Text)
+    last_pc = db.Column(db.Text)
+    last_update = db.Column(db.Text)
+
+    def to_dict(self):
+        return {c.name: getattr(self, c.name) or "" for c in self.__table__.columns}
 
 
-# ======================================================
-# 기본 체크
-# ======================================================
+# =========================
+# 초기화
+# =========================
+with app.app_context():
+    db.create_all()
 
-@app.route("/ping", methods=["GET"])
+def now_ts():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# =========================
+# API
+# =========================
+@app.get("/ping")
 def ping():
-    return "pong", 200
+    return "pong"
 
-
-# ======================================================
-# 발주 목록 조회 + 검색
-# ======================================================
-
-@app.route("/orders", methods=["GET"])
+@app.get("/orders")
 def list_orders():
-    q = request.args.get("q", "").strip()
-
-    conn = get_conn()
-    cur = conn.cursor()
+    q = (request.args.get("q") or "").strip()
+    query = PurchaseOrder.query
 
     if q:
         like = f"%{q}%"
-        cur.execute(
-            """
-            SELECT * FROM orders
-            WHERE po_number LIKE ?
-               OR data LIKE ?
-            ORDER BY id DESC
-            """,
-            (like, like),
+        query = query.filter(
+            PurchaseOrder.vendor.ilike(like) |
+            PurchaseOrder.po_number.ilike(like) |
+            PurchaseOrder.equip_name.ilike(like) |
+            PurchaseOrder.remark.ilike(like)
         )
-    else:
-        cur.execute("SELECT * FROM orders ORDER BY id DESC")
 
-    rows = cur.fetchall()
-    conn.close()
+    rows = query.order_by(PurchaseOrder.id.desc()).all()
+    return jsonify([r.to_dict() for r in rows])
 
-    return jsonify([row_to_dict(r) for r in rows]), 200
+@app.get("/orders/<int:oid>")
+def get_order(oid):
+    r = PurchaseOrder.query.get_or_404(oid)
+    return jsonify(r.to_dict())
 
-
-# ======================================================
-# 단일 발주 조회
-# ======================================================
-
-@app.route("/orders/<int:order_id>", methods=["GET"])
-def get_order(order_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
-    row = cur.fetchone()
-    conn.close()
-
-    if not row:
-        return jsonify({"error": "not_found"}), 404
-
-    return jsonify(row_to_dict(row)), 200
-
-
-# ======================================================
-# 새 발주 생성
-# ======================================================
-
-@app.route("/orders", methods=["POST"])
+@app.post("/orders")
 def create_order():
-    payload = request.get_json(silent=True) or {}
+    data = request.get_json(force=True)
+    ts = now_ts()
 
-    po_number = str(payload.get("po_number", "")).strip()
-    now = datetime.utcnow().isoformat()
+    r = PurchaseOrder(**data)
+    r.created_at = ts
+    r.updated_at = ts
+    r.row_version = 1
 
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO orders (po_number, data, row_version, created_at, updated_at)
-        VALUES (?, ?, 1, ?, ?)
-        """,
-        (po_number, json.dumps(payload, ensure_ascii=False), now, now),
-    )
-    new_id = cur.lastrowid
-    conn.commit()
+    db.session.add(r)
+    db.session.commit()
+    return jsonify(r.to_dict()), 201
 
-    cur.execute("SELECT * FROM orders WHERE id = ?", (new_id,))
-    row = cur.fetchone()
-    conn.close()
+@app.put("/orders/<int:oid>")
+def update_order(oid):
+    r = PurchaseOrder.query.get_or_404(oid)
+    data = request.get_json(force=True)
 
-    return jsonify(row_to_dict(row)), 201
+    if int(data.get("row_version", 1)) != r.row_version:
+        return jsonify({"error": "conflict", "db_version": r.row_version}), 409
 
+    for k, v in data.items():
+        if hasattr(r, k):
+            setattr(r, k, v)
 
-# ======================================================
-# 기존 발주 수정 (row_version 충돌 방지)
-# ======================================================
+    r.row_version += 1
+    r.updated_at = now_ts()
+    db.session.commit()
+    return jsonify(r.to_dict())
 
-@app.route("/orders/<int:order_id>", methods=["PUT"])
-def update_order(order_id: int):
-    payload = request.get_json(silent=True) or {}
+@app.delete("/orders/<int:oid>")
+def delete_order(oid):
+    r = PurchaseOrder.query.get_or_404(oid)
+    db.session.delete(r)
+    db.session.commit()
+    return jsonify({"ok": True})
 
-    sent_version = payload.pop("row_version", None)
-    po_number = str(payload.get("po_number", "")).strip()
+# =========================
+# 파일 업로드 / 서빙 (기존 로직 유지)
+# =========================
+FILE_FIELDS = {"invoice_file", "workconfirm_file", "inspect_file", "extra_pdf_file"}
 
-    conn = get_conn()
-    cur = conn.cursor()
+@app.post("/orders/<int:oid>/files")
+def upload_files(oid):
+    r = PurchaseOrder.query.get_or_404(oid)
 
-    cur.execute("SELECT row_version FROM orders WHERE id = ?", (order_id,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        return jsonify({"error": "not_found"}), 404
-
-    db_version = row["row_version"]
-
-    if sent_version is not None and int(sent_version) != db_version:
-        conn.close()
-        return jsonify({
-            "error": "version_conflict",
-            "db_version": db_version
-        }), 409
-
-    now = datetime.utcnow().isoformat()
-
-    cur.execute(
-        """
-        UPDATE orders
-        SET po_number = ?,
-            data = ?,
-            row_version = row_version + 1,
-            updated_at = ?
-        WHERE id = ?
-        """,
-        (po_number, json.dumps(payload, ensure_ascii=False), now, order_id),
-    )
-    conn.commit()
-
-    cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
-    updated = cur.fetchone()
-    conn.close()
-
-    return jsonify(row_to_dict(updated)), 200
-
-
-# ======================================================
-# 발주 삭제 + 첨부파일 삭제
-# ======================================================
-
-@app.route("/orders/<int:order_id>", methods=["DELETE"])
-def delete_order(order_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM orders WHERE id = ?", (order_id,))
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-
-    folder = os.path.join(UPLOAD_ROOT, str(order_id))
-    if os.path.isdir(folder):
-        shutil.rmtree(folder, ignore_errors=True)
-
-    if deleted == 0:
-        return jsonify({"error": "not_found"}), 404
-
-    return jsonify({"status": "deleted", "id": order_id}), 200
-
-
-# ======================================================
-# 첨부파일 업로드 (B방식 핵심)
-# ======================================================
-
-@app.route("/orders/<int:order_id>/files", methods=["POST"])
-def upload_files(order_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        return jsonify({"error": "not_found"}), 404
-
-    data = row_to_dict(row)
-    meta = {"id", "row_version", "created_at", "updated_at"}
-    payload = {k: v for k, v in data.items() if k not in meta}
-
-    upload_dir = os.path.join(UPLOAD_ROOT, str(order_id))
-    os.makedirs(upload_dir, exist_ok=True)
-
-    file_fields = [
-        "invoice_file",
-        "workconfirm_file",
-        "inspect_file",
-        "extra_pdf_file",
-    ]
-
-    updated = {}
-
-    for field in file_fields:
-        file = request.files.get(field)
-        if not file or not file.filename:
+    for field, fs in request.files.items():
+        if field not in FILE_FIELDS:
             continue
+        name = secure_filename(fs.filename)
+        save_dir = UPLOAD_ROOT / str(oid) / field
+        save_dir.mkdir(parents=True, exist_ok=True)
+        path = save_dir / name
+        fs.save(path)
 
-        safe_name = f"{field}_{file.filename}"
-        save_path = os.path.join(upload_dir, safe_name)
-        file.save(save_path)
+        setattr(r, field, f"/files/{oid}/{field}/{name}")
 
-        url_path = f"/files/{order_id}/{safe_name}"
-        payload[field] = url_path
-        updated[field] = url_path
+    r.row_version += 1
+    r.updated_at = now_ts()
+    db.session.commit()
+    return jsonify(r.to_dict())
 
-    if not updated:
-        conn.close()
-        return jsonify({"status": "no_files"}), 200
-
-    now = datetime.utcnow().isoformat()
-    po_number = str(payload.get("po_number", "")).strip()
-
-    cur.execute(
-        """
-        UPDATE orders
-        SET po_number = ?,
-            data = ?,
-            row_version = row_version + 1,
-            updated_at = ?
-        WHERE id = ?
-        """,
-        (po_number, json.dumps(payload, ensure_ascii=False), now, order_id),
-    )
-    conn.commit()
-    conn.close()
-
-    return jsonify({"status": "ok", "files": updated}), 200
-
-
-# ======================================================
-# 파일 제공
-# ======================================================
-
-@app.route("/files/<int:order_id>/<path:filename>", methods=["GET"])
-def serve_file(order_id: int, filename: str):
-    upload_dir = os.path.join(UPLOAD_ROOT, str(order_id))
-    return send_from_directory(upload_dir, filename, as_attachment=False)
-
-
-# ======================================================
-# Render 실행 진입점
-# ======================================================
-
-if __name__ == "__main__":
-    # 로컬 테스트용
-    app.run(host="0.0.0.0", port=5000, debug=True)
+@app.get("/files/<path:subpath>")
+def serve_files(subpath):
+    full = (UPLOAD_ROOT / subpath).resolve()
+    if not full.exists():
+        abort(404)
+    return send_from_directory(full.parent, full.name)
