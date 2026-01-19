@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>설치이력 관리 시스템</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="page-root">
+    <header class="page-header">
+      <div class="page-header-inner">
+        <div class="logo-area">
+          <span class="logo-dot"></span>
+          <span class="logo-text">설치이력 관리 시스템</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-container">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

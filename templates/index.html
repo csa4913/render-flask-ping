@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>엑셀 양식 관리</title>
+  <style>
+    :root {
+      --bg:#0b1220; --card:#111a2e; --text:#e8eefc; --muted:#a8b3cc;
+      --line:#223055; --btn:#2b6fff; --danger:#ff4d4d; --chip:#1a2747;
+    }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans KR", sans-serif; background:var(--bg); color:var(--text); }
+    .wrap { max-width: 1200px; margin: 22px auto; padding: 0 14px; }
+    h1 { font-size: 20px; margin: 0 0 14px; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom: 12px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px; }
+    input, select { background:#0e1730; border:1px solid var(--line); color:var(--text); border-radius:10px; padding:10px; }
+    button { border:0; border-radius:10px; padding:10px 12px; cursor:pointer; }
+    .btn { background:var(--btn); color:white; }
+    .btn-ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+    .btn-danger { background:transparent; border:1px solid rgba(255,77,77,.6); color: #ffb3b3; }
+    .grid { width:100%; border-collapse:collapse; overflow:hidden; }
+    th, td { border-bottom:1px solid var(--line); padding:10px; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; text-align:left; font-size: 13px; }
+    .meta { font-size: 12px; color: var(--muted); }
+    .badge { display:inline-flex; align-items:center; gap:6px; background:var(--chip); padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+    .badge .num { background:#0e1730; padding:2px 7px; border-radius:999px; border:1px solid var(--line); }
+    .files { display:flex; flex-direction:column; gap:6px; }
+    .fileRow { display:flex; gap:8px; align-items:center; }
+    .fileLink { color:#bcd1ff; text-decoration:none; }
+    .mini { padding:6px 8px; font-size:12px; border-radius:9px; }
+    .uploader { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .pill { font-size:12px; color:var(--muted); }
+    .groupHead { margin: 16px 0 8px; font-size: 14px; color: #d6def5; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>엑셀 양식 관리</h1>
+
+    <div class="toolbar card">
+      <div style="display:flex; gap:10px; flex-wrap:wrap; width:100%;">
+        <input id="title" placeholder="제목(필수)" style="flex:1; min-width:220px;">
+        <select id="category" style="min-width:140px;">
+          <option>점검</option>
+          <option>공사</option>
+          <option>AS</option>
+          <option selected>기타</option>
+        </select>
+        <input id="note" placeholder="비고(선택)" style="flex:1; min-width:220px;">
+        <button class="btn" onclick="createRow()">추가</button>
+
+        <span style="flex-basis:100%; height:0;"></span>
+
+        <span class="pill">정렬/표시</span>
+        <select id="groupMode" onchange="refresh()" class="btn-ghost">
+          <option value="time" selected>시간순</option>
+          <option value="kind">종류별 그룹핑</option>
+        </select>
+
+        <span id="totalBadge" class="badge" title="전체 첨부 수">
+          📎 파일 개수 <span class="num">0</span>
+        </span>
+      </div>
+    </div>
+
+    <div id="content" class="card"></div>
+  </div>
+
+  <script src="/static/main.js"></script>
+</body>
+</html>
